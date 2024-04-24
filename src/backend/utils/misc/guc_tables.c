@@ -1997,6 +1997,57 @@ struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 
+	{
+            {"ml_cardest_enabled", PGC_USERSET, UNGROUPED,
+             gettext_noop("Enable ML-based Cardinality Estimation."),
+             NULL
+            },
+            &ml_cardest_enabled,
+            false,
+            NULL, NULL, NULL
+    },
+
+    {
+            {"ml_joinest_enabled", PGC_USERSET, UNGROUPED,
+             gettext_noop("Enable ML-based Cardinality Estimation."),
+             NULL
+            },
+            &ml_joinest_enabled,
+            false,
+            NULL, NULL, NULL
+    },
+
+    {
+            {"debug_card_est", PGC_USERSET, UNGROUPED,
+             gettext_noop("Enable cardinality estimation debug."),
+             NULL
+            },
+            &debug_card_est,
+            false,
+            NULL, NULL, NULL
+    },
+
+    {
+            {"print_single_tbl_queries", PGC_USERSET, UNGROUPED,
+             gettext_noop("Enable single-table queries printing."),
+             NULL
+            },
+            &print_single_tbl_queries,
+            false,
+            NULL, NULL, NULL
+
+    },
+
+    {
+            {"print_sub_queries", PGC_USERSET, UNGROUPED,
+             gettext_noop("Enable sub-queries printing."),
+             NULL
+            },
+            &print_sub_queries,
+            false,
+            NULL, NULL, NULL
+    },
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, false, NULL, NULL, NULL
@@ -3505,6 +3556,25 @@ struct config_int ConfigureNamesInt[] =
 		NULL, NULL, NULL
 	},
 
+	{
+            {"query_no", PGC_USERSET, UNGROUPED,
+             gettext_noop("Sets the query number of cardinality estimation."),
+             NULL
+            },
+            &query_no,
+            0, 0, INT_MAX,
+            NULL, NULL, NULL
+    },
+
+    {
+            {"join_est_no", PGC_USERSET, UNGROUPED,
+             gettext_noop("Sets the query number of cardinality estimation."),
+             NULL
+            },
+            &join_est_no,
+            0, 0, INT_MAX,
+            NULL, NULL, NULL
+    },
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, 0, 0, 0, NULL, NULL, NULL
@@ -4548,6 +4618,28 @@ struct config_string ConfigureNamesString[] =
 		"",
 		check_debug_io_direct, assign_debug_io_direct, NULL
 	},
+
+	{
+            {"ml_cardest_fname", PGC_USERSET, UNGROUPED,
+                    gettext_noop("Sets the file name of ML-based cardnality estimation."),
+                    NULL,
+                    GUC_IS_NAME
+            },
+            &ml_cardest_fname,
+            "",
+            check_cluster_name, NULL, NULL
+    },
+
+    {
+            {"ml_joinest_fname", PGC_USERSET, UNGROUPED,
+                    gettext_noop("Sets the file name of ML-based join size estimation."),
+                    NULL,
+                    GUC_IS_NAME
+            },
+            &ml_joinest_fname,
+            "",
+            check_cluster_name, NULL, NULL
+    },
 
 	/* End-of-list marker */
 	{

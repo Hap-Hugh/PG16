@@ -72,6 +72,20 @@ extern PGDLLIMPORT bool enable_presorted_aggregate;
 extern PGDLLIMPORT bool enable_async_append;
 extern PGDLLIMPORT int constraint_exclusion;
 
+extern int  query_no;
+extern int  join_est_no;
+extern bool ml_cardest_enabled;
+extern bool ml_joinest_enabled;
+extern bool debug_card_est;
+extern bool print_sub_queries;
+extern bool print_single_tbl_queries;
+extern char *ml_cardest_fname;
+extern char *ml_joinest_fname;
+
+extern int  top_n;
+
+extern void debug_print_rel(PlannerInfo *root, RelOptInfo *rel);
+
 extern double index_pages_fetched(double tuples_fetched, BlockNumber pages,
 								  double index_pages, PlannerInfo *root);
 extern void cost_seqscan(Path *path, PlannerInfo *root, RelOptInfo *baserel,

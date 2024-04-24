@@ -99,8 +99,32 @@
 #include "utils/spccache.h"
 #include "utils/tuplesort.h"
 
+#include "nodes/print.h"
+#include <unistd.h>
+#include <time.h>
+#include <stdlib.h>
+
 
 #define LOG2(x)  (log(x) / 0.693147180559945)
+
+/** modified  */
+#define CARD_EST_QUERY_NUM 10000
+static double card_ests[CARD_EST_QUERY_NUM] = {0.0};
+static double mypointers[CARD_EST_QUERY_NUM] = {0.0};
+static double join_card_ests[CARD_EST_QUERY_NUM] = {0.0};
+int         query_no = 0;
+int         join_est_no = 0;
+bool        ml_cardest_enabled = false;
+bool        ml_joinest_enabled = false;
+bool        debug_card_est = false;
+bool        print_sub_queries = false;
+bool        print_single_tbl_queries = false;
+char        *ml_cardest_fname = NULL;
+char        *ml_joinest_fname = NULL;
+bool		already_read_pointers = false;
+bool 		already_read_base = false;
+bool 		already_read_join = false;
+/** =====modified  */
 
 /*
  * Append and MergeAppend nodes are less expensive than some other operations
@@ -193,6 +217,312 @@ static int32 get_expr_width(PlannerInfo *root, const Node *expr);
 static double relation_byte_size(double tuples, int width);
 static double page_size(double tuples, int width);
 static double get_parallel_divisor(Path *path);
+/** modified  */
+static void print_est_card(const char* func_name, double card);
+static void print_query_no(const char* func_name);
+static void read_from_fspn_estimate(const char* filename);
+static void read_from_rel_pointers(const char* filename);
+static void read_from_fspn_join_estimate(const char* filename);
+static void fprint_expr(FILE* fp, const Node *expr, const List *rtable);
+
+
+static void
+print_relids(FILE* fp, PlannerInfo *root, Relids relids)
+{
+    int			x;
+    bool		first = true;
+
+    x = -1;
+    while ((x = bms_next_member(relids, x)) >= 0)
+    {
+        if (!first)
+            fprintf(fp, " ");
+        if (x < root->simple_rel_array_size &&
+            root->simple_rte_array[x])
+            fprintf(fp, "%s", root->simple_rte_array[x]->eref->aliasname);
+        else
+            fprintf(fp, "%d", x);
+        first = false;
+    }
+}
+
+static void
+print_restrictclauses(FILE* fp, PlannerInfo *root, List *clauses)
+{
+    ListCell   *l;
+
+    foreach(l, clauses)
+    {
+        RestrictInfo *c = lfirst(l);
+
+        fprint_expr(fp, (Node *) c->clause, root->parse->rtable);
+        if (lnext(clauses, l))
+            fprintf(fp, ", ");
+    }
+}
+
+static void
+fprint_expr(FILE* fp, const Node *expr, const List *rtable)
+{
+    if (expr == NULL)
+    {
+        fprintf(fp,"<>");
+        return;
+    }
+
+    if (IsA(expr, Var))
+    {
+        const Var  *var = (const Var *) expr;
+        char	   *relname,
+                *attname;
+
+        switch (var->varno)
+        {
+            case INNER_VAR:
+                relname = "INNER";
+                attname = "?";
+                break;
+            case OUTER_VAR:
+                relname = "OUTER";
+                attname = "?";
+                break;
+            case INDEX_VAR:
+                relname = "INDEX";
+                attname = "?";
+                break;
+            default:
+            {
+                RangeTblEntry *rte;
+
+                Assert(var->varno > 0 &&
+                       (int) var->varno <= list_length(rtable));
+                rte = rt_fetch(var->varno, rtable);
+                relname = rte->eref->aliasname;
+                attname = get_rte_attribute_name(rte, var->varattno);
+            }
+                break;
+        }
+        fprintf(fp,"%s.%s", relname, attname);
+    }
+    else if (IsA(expr, Const))
+    {
+        const Const *c = (const Const *) expr;
+        Oid			typoutput;
+        bool		typIsVarlena;
+        char	   *outputstr;
+
+        if (c->constisnull)
+        {
+            fprintf(fp,"NULL");
+            return;
+        }
+
+        getTypeOutputInfo(c->consttype,
+                          &typoutput, &typIsVarlena);
+
+        outputstr = OidOutputFunctionCall(typoutput, c->constvalue);
+        fprintf(fp,"%s", outputstr);
+        pfree(outputstr);
+    }
+    else if (IsA(expr, OpExpr))
+    {
+        const OpExpr *e = (const OpExpr *) expr;
+        char	   *opname;
+
+        opname = get_opname(e->opno);
+        if (list_length(e->args) > 1)
+        {
+            fprint_expr(fp, get_leftop((const Expr *) e), rtable);
+            fprintf(fp," %s ", ((opname != NULL) ? opname : "(invalid operator)"));
+            fprint_expr(fp, get_rightop((const Expr *) e), rtable);
+        }
+        else
+        {
+            /* we print prefix and postfix ops the same... */
+            fprintf(fp,"%s ", ((opname != NULL) ? opname : "(invalid operator)"));
+            fprint_expr(fp, get_leftop((const Expr *) e), rtable);
+        }
+    }
+    else if (IsA(expr, FuncExpr))
+    {
+        const FuncExpr *e = (const FuncExpr *) expr;
+        char	   *funcname;
+        ListCell   *l;
+
+        funcname = get_func_name(e->funcid);
+        fprintf(fp,"%s(", ((funcname != NULL) ? funcname : "(invalid function)"));
+        foreach(l, e->args)
+        {
+            fprint_expr(fp, lfirst(l), rtable);
+            if (lnext(e->args, l))
+                fprintf(fp,",");
+        }
+        fprintf(fp,")");
+    }
+    else
+        fprintf(fp,"unknown expr");
+}
+
+static void
+print_basic_rel(FILE* fp, PlannerInfo *root, RelOptInfo *rel){
+    fprintf(fp, "RELOPTINFO (");
+    print_relids(fp, root, rel->relids);
+    fprintf(fp, "): rows=%.0f width=%d\n", rel->rows, rel->reltarget->width);
+
+    if (rel->baserestrictinfo)
+    {
+        fprintf(fp, "\tbaserestrictinfo: ");
+        print_restrictclauses(fp, root, rel->baserestrictinfo);
+        fprintf(fp, "\n");
+    }
+
+}
+
+static void
+print_single_rel(PlannerInfo *root, RelOptInfo *rel, double orows) {
+    FILE* f_rec= fopen("single_tbl_est_record.txt", "a+");
+
+    // fprintf(f_rec, "query: %d\n", query_no++);
+	fprintf(f_rec, "query: %d\n", query_no);
+    print_basic_rel(f_rec, root, rel);
+	fprintf(f_rec, "Estimated Rows: %lf\n", rel->rows);
+	fprintf(f_rec, "Raw rows: %lf\n", orows);
+	fprintf(f_rec, "Est_sel: %.15f\n", rel->rows / orows);
+    fprintf(f_rec, "\n\n");
+    fclose(f_rec);
+}
+
+static void
+print_join_rel(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2, double nrows){
+    FILE* f_rec= fopen("join_est_record_job.txt", "a+");
+
+    // fprintf(f_rec, "query: %d\n", query_no++);
+	fprintf(f_rec, "query: %d\n", join_est_no + query_no - 1);
+    fprintf(f_rec, "==================inner_rel======%d============: \n", rel1->relid);
+    print_basic_rel(f_rec, root, rel1);
+    fprintf(f_rec, "==================outer_rel======%d============: \n", rel2->relid);
+    print_basic_rel(f_rec, root, rel2);
+	fprintf(f_rec, "Estimated Rows: %lf\n", nrows);
+	fprintf(f_rec, "Raw Rows: %lf\n", rel1->rows * rel2->rows);
+	fprintf(f_rec, "Selectivity: %.15f\n", nrows / (rel1->rows * rel2->rows));
+
+    fprintf(f_rec, "\n\n");
+
+    fclose(f_rec);
+}
+
+static void
+print_query_no(const char* func_name)
+{
+    FILE *file = fopen("costsize.log", "a+");
+
+    time_t rawtime;
+    struct tm * timeinfo;
+    char time_buffer [128];
+
+    time (&rawtime);
+    timeinfo = localtime (&rawtime);
+    strftime (time_buffer,sizeof(time_buffer),"%Y/%m/%d %H:%M:%S",timeinfo);
+
+    fprintf(file, "%s: pid[%d] in [%s]: query num: %d\n", time_buffer, getpid(), func_name, query_no);
+    fclose(file);
+}
+
+static void
+print_est_card(const char* func_name, double card_est)
+{
+    FILE *file = fopen("costsize.log", "a+");
+
+    time_t rawtime;
+    struct tm * timeinfo;
+    char time_buffer [128];
+
+    time (&rawtime);
+    timeinfo = localtime (&rawtime);
+    strftime (time_buffer,sizeof(time_buffer),"%Y/%m/%d %H:%M:%S",timeinfo);
+
+    fprintf(file, "%s: pid[%d] in [%s]: %0.9f\n", time_buffer, getpid(), func_name, card_est);
+    fclose(file);
+}
+
+static void
+read_from_fspn_estimate(const char* filename)
+{
+    FILE* fp = fopen(filename, "r");
+    double card_est;
+    int query_cnt = 0;
+
+    while (fscanf(fp, "%lf", &card_est) == 1){
+        card_ests[query_cnt] = card_est;
+        query_cnt += 1;
+    }
+	already_read_base = true;
+    fclose(fp);
+}
+
+static void
+read_from_fspn_join_estimate(const char* filename){
+//    FILE* fp = fopen("fspn_job_light_join_est_fkfk_with_psql.txt", "r");
+	// if (already_read_join){
+	// 	return;
+	// }
+    FILE* fp = fopen(filename, "r");
+
+    double card_est;
+    int cnt = 0;
+
+    while (fscanf(fp, "%lf", &card_est) == 1){
+        join_card_ests[cnt] = card_est;
+        cnt += 1;
+    }
+	already_read_join = true;
+    fclose(fp);
+}
+
+static void 
+read_from_rel_pointers(const char* filename){
+
+	FILE* fp = fopen(filename, "r");
+	int pointer;
+
+	for (int i = 0; i < CARD_EST_QUERY_NUM; i++){
+		mypointers[i] = 0.0;
+	}
+
+	while (fscanf(fp, "%d", &pointer) == 1){
+        mypointers[pointer] = 1.0;
+		// if (true) {
+		// 	FILE *ffp = fopen("debug_pointers.txt", "a+");
+		// 	fprintf(ffp, "%d find pointer: %lf \n", pointer, mypointers[pointer]);
+		// 	fclose(ffp);
+		// }
+		
+	}
+    
+	// if (true) {
+	// 	FILE *ffp = fopen("debug_pointers.txt", "a+");
+	// 	for (int i = 0; i < 100; i++){
+	// 		fprintf(ffp, "%lf\n", mypointers[i]);
+	// 	}
+	// 	fclose(ffp);
+	// }
+
+
+	fclose(fp);
+}
+
+
+
+int
+StringCompare( const void* a, const void* b)
+{
+    char const **char_a = a;
+    char const **char_b = b;
+
+    return strcmp(*char_a, *char_b);
+}
+
+/** =====modified  */
 
 
 /*
@@ -591,6 +921,10 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 				   &indexStartupCost, &indexTotalCost,
 				   &indexSelectivity, &indexCorrelation,
 				   &index_pages);
+
+//    if (ml_cardest_enabled) {
+//        print_est_card(__FUNCTION__, indexSelectivity);
+//    }
 
 	/*
 	 * Save amcostestimate's results for possible use in bitmap scan planning.
@@ -5011,8 +5345,34 @@ set_baserel_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 							   JOIN_INNER,
 							   NULL);
 
+	if(ml_cardest_enabled){
+//        print_query_no(__FUNCTION__);
+        if (query_no == 0) {
+            read_from_fspn_estimate(ml_cardest_fname);
+			read_from_rel_pointers("pointers.txt");
+        }
+
+
+		if (mypointers[query_no] > 0){
+			double new_nrows = rel->tuples * card_ests[query_no];
+
+			// if (true) {
+			// 	FILE *ffp = fopen("going_to_change_base.txt", "a+");
+			// 	fprintf(ffp, "%d %.5f:%.5f\n", query_no, nrows, new_nrows);
+			// 	fclose(ffp);
+			// }
+
+			nrows = new_nrows;
+
+		}
+	}
+
 	rel->rows = clamp_row_est(nrows);
 
+	if(print_single_tbl_queries){
+    	print_single_rel(root, rel, rel->tuples);
+	}
+	query_no++;
 	cost_qual_eval(&rel->baserestrictcost, rel->baserestrictinfo, root);
 
 	set_rel_width(root, rel);
@@ -5090,6 +5450,9 @@ set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 										   inner_rel->rows,
 										   sjinfo,
 										   restrictlist);
+
+//    debug_print_rel(root, rel);
+//    print_est_card(__FUNCTION__, rel->rows);
 }
 
 /*
@@ -5133,6 +5496,7 @@ get_parameterized_joinrel_size(PlannerInfo *root, RelOptInfo *rel,
 									   inner_path->rows,
 									   sjinfo,
 									   restrict_clauses);
+//    print_est_card(__FUNCTION__, nrows);
 	/* For safety, make sure result is not more than the base estimate */
 	if (nrows > rel->rows)
 		nrows = rel->rows;
@@ -5280,6 +5644,23 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 			break;
 	}
 
+
+    if (ml_joinest_enabled) {
+
+        if (join_est_no == 0) {
+            read_from_fspn_join_estimate(ml_joinest_fname);
+        }
+        if (mypointers[query_no + join_est_no] > 0){
+
+			double join_est = outer_rows * inner_rows * join_card_ests[join_est_no];
+			nrows = join_est;
+		}
+    }
+	join_est_no++;
+	/*  print for sub-queries*/
+	if (print_sub_queries){
+		print_join_rel(root, inner_rel, outer_rel, nrows);
+	}
 	return clamp_row_est(nrows);
 }
 
