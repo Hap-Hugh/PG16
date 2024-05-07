@@ -1,27 +1,39 @@
-PostgreSQL Database Management System
-=====================================
+wget https://ftp.postgresql.org/pub/source/v16.2/postgresql-16.2.tar.bz2
+tar xvf postgresql-16.2.tar.bz2
+cd ~/postgresql-16.2/
 
-This directory contains the source code distribution of the PostgreSQL
-database management system.
+=== patch things (or copy cpp files)
 
-PostgreSQL is an advanced object-relational database management system
-that supports an extended subset of the SQL standard, including
-transactions, foreign keys, subqueries, triggers, user-defined types
-and functions.  This distribution also contains C language bindings.
+./configure --prefix=/usr/local/pgsql/16.2 --without-readline --without-icu
+make && sudo make install
+echo 'export PATH=/usr/local/pgsql/16.2/bin:$PATH' >> ~/.bashrc
+source ~/.bashrc
 
-PostgreSQL has many language interfaces, many of which are listed here:
 
-	https://www.postgresql.org/download/
+==== if haven’t clone pghintplan
+git clone https://github.com/ossc-db/pg_hint_plan.git -b REL16_1_6_0
+cd ~/pg_hint_plan
+==== if haven’t modify the Makefile of pghintplan:
+==== copy /usr/local/pgsql/16.2/bin/pg_config in Makefile
+# Modify Makefile: change line
+#   PG_CONFIG = pg_config
+# to
+#   PG_CONFIG = /usr/local/pgsql/16.2/bin/pg_config
 
-See the file INSTALL for instructions on how to build and install
-PostgreSQL.  That file also lists supported operating systems and
-hardware platforms and contains information regarding any other
-software packages that are required to build or run the PostgreSQL
-system.  Copyright and license information can be found in the
-file COPYRIGHT.  A comprehensive documentation set is included in this
-distribution; it can be read as described in the installation
-instructions.
+make
+sudo make install
 
-The latest version of this software may be obtained at
-https://www.postgresql.org/download/.  For more information look at our
-web site located at https://www.postgresql.org/.
+rm -rf ~/imdb initdb
+pg_ctl -D ~/imdb initdb
+
+==== MAKE SURE YOU USE THE RIGHT .CONF!!
+cp ~/postgresql.conf ~/imdb/
+
+pg_ctl -D ~/imdb start -l logfile
+
+==== if haven’t download
+wget -c http://homepages.cwi.nl/~boncz/job/imdb.tgz && tar -xvzf imdb.tgz
+==== Now, use balsa’s code to load job data
+cd ~/balsa
+bash load-postgres/load_job_postgres.sh ~/datasets/job
+cd ~/robust-vcm
